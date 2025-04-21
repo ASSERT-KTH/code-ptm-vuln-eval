@@ -5,3 +5,5 @@ transformers
 accelerate
 pyarrow
 scikit-learn
+datasets
+wandb

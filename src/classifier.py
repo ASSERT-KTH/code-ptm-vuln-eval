@@ -1,22 +1,24 @@
 import json
 import sys
-
+import os
 import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 import argparse
 from configs import get_model, get_task
-from sklearn.metrics import f1_score
-
+from sklearn.metrics import f1_score, accuracy_score, matthews_corrcoef
+import wandb
+from datetime import datetime
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train and evaluate a classifier on extracted features.")
     parser.add_argument("--task", type=str, required=True, help="Task name (e.g., vul).")
     parser.add_argument("--model", type=str, required=True, help="Model name (e.g., codebert).")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name (e.g., devign, primevul).")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for DataLoader.")
-    parser.add_argument("--num_epochs", type=int, default=500, help="Number of training epochs.")
-    parser.add_argument("--learning_rate", type=float, default=0.000001, help="Learning rate for the optimizer.")
+    parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs.")
+    parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate for the optimizer.")
     parser.add_argument("--method", type=str, default="CLS", choices=["CLS", "AVG", "MAX"], help="Method to use for feature extraction.")
 
     return parser.parse_args()
@@ -66,10 +68,15 @@ class Classifier(nn.Module):
 def train_model(model, train_loader, val_loader, num_epochs, learning_rate):
     criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    best_val_f1 = 0.0
+    
+    checkpoint_dir = "checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    model_name = f"{args.task}_{args.dataset}_{args.model}_{args.method}_lr{learning_rate}"
+    best_model_path = os.path.join(checkpoint_dir, f"{model_name}_best.pt")
 
     for epoch in tqdm(range(num_epochs), desc="Training Progress"):
         model.train()
-        train_acc = 0
         train_loss = 0
         all_preds = []
         all_labels = []
@@ -81,7 +88,6 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate):
             train_loss += loss.item()
 
             preds = outputs.argmax(dim=1)
-            train_acc += (preds == y).float().mean()
 
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(y.cpu().numpy())
@@ -91,47 +97,78 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate):
             loss.backward()
             optimizer.step()
 
-        train_acc /= len(train_loader)
+        # Calculate epoch-level metrics
+        train_acc = accuracy_score(all_labels, all_preds)
         train_loss /= len(train_loader)
         train_f1 = f1_score(all_labels, all_preds, average='weighted')
+        train_mcc = matthews_corrcoef(all_labels, all_preds)
 
-        if epoch % 100 == 0:
-            print(
-                f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], "
-                f"Loss: {train_loss:.4f}, Accuracy: {train_acc:.4f}, F1 Score: {train_f1:.4f}"
-            )
+        # Validation
+        model.eval()
+        val_loss = 0
+        val_preds = []
+        val_labels = []
 
-            # Validation
-            model.eval()
-            val_loss = 0
-            val_accuracy = 0
-            val_preds = []
-            val_labels = []
+        with torch.no_grad():
+            for x, y in val_loader:
+                outputs = model(x)
+                loss = criterion(outputs, y)
+                val_loss += loss.item()
 
-            with torch.no_grad():
-                for x, y in val_loader:
-                    outputs = model(x)
-                    loss = criterion(outputs, y)
-                    val_loss += loss.item()
+                preds = outputs.argmax(dim=1)
 
-                    preds = outputs.argmax(dim=1)
-                    val_accuracy += (preds == y).float().mean().item()
+                val_preds.extend(preds.cpu().numpy())
+                val_labels.extend(y.cpu().numpy())
 
-                    val_preds.extend(preds.cpu().numpy())
-                    val_labels.extend(y.cpu().numpy())
+        val_loss /= len(val_loader)
+        val_accuracy = accuracy_score(val_labels, val_preds)
+        val_f1 = f1_score(val_labels, val_preds, average='weighted')
+        val_mcc = matthews_corrcoef(val_labels, val_preds)
 
-            val_loss /= len(val_loader)
-            val_accuracy /= len(val_loader)
-            val_f1 = f1_score(val_labels, val_preds, average='weighted')
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            checkpoint = {
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_f1': val_f1,
+                'val_accuracy': val_accuracy,
+                'val_mcc': val_mcc,
+                'hyperparameters': {
+                    'learning_rate': learning_rate,
+                    'batch_size': args.batch_size,
+                    'method': args.method,
+                }
+            }
+            torch.save(checkpoint, best_model_path)
+            print(f"Saved best model with validation F1: {val_f1:.4f} to {best_model_path}")
 
-            print(
-                f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}, "
-                f"Validation F1 Score: {val_f1:.4f}"
-            )
+        wandb.log({
+            "epoch": epoch + 1,
+            "train_loss": train_loss,
+            "train_accuracy": train_acc,
+            "train_f1": train_f1,
+            "train_mcc": train_mcc,
+            "val_loss": val_loss,
+            "val_accuracy": val_accuracy,
+            "val_f1": val_f1,
+            "val_mcc": val_mcc,
+        })
+
+        print(
+            f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], "
+            f"Loss: {train_loss:.4f}, Accuracy: {train_acc:.4f}, "
+            f"F1 Score: {train_f1:.4f}, MCC: {train_mcc:.4f}"
+        )
+        print(
+            f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}, "
+            f"Validation F1 Score: {val_f1:.4f}, Validation MCC: {val_mcc:.4f}"
+        )
+    return best_model_path
+
 
 def test_model(model, test_loader):
     model.eval()
-    correct = 0
     total = 0
     all_preds = []
     all_labels = []
@@ -142,24 +179,32 @@ def test_model(model, test_loader):
             predicted = outputs.argmax(dim=1)
 
             # Accuracy computation
-            correct += (predicted == y).sum().item()
             total += y.size(0)
 
             # Collect predictions and labels for F1
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(y.cpu().numpy())
 
-    test_accuracy = correct / total
+    test_accuracy = accuracy_score(all_labels, all_preds)
     test_f1 = f1_score(all_labels, all_preds, average='weighted')
+    test_mcc = matthews_corrcoef(all_labels, all_preds)
 
-    print(f"Test Accuracy: {test_accuracy:.4f}, Test F1 Score: {test_f1:.4f}")
+    # wandb.log({
+    #     "test_accuracy": test_accuracy,
+    #     "test_f1": test_f1,
+    #     "test_mcc": test_mcc,
+    # })
+    print(
+        f"Test Accuracy: {test_accuracy:.4f}, Test F1 Score: {test_f1:.4f}, "
+        f"Test MCC: {test_mcc:.4f}"
+    )
 
 
 if __name__ == "__main__":
     args = parse_args()
 
     # Load task and model configurations
-    task = get_task(args.task)
+    task = get_task(args.task, args.dataset)
     model_config = get_model(args.model)
 
     # Get hyperparameters from command line arguments
@@ -200,9 +245,44 @@ if __name__ == "__main__":
     val_loader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False)
     test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
 
-    # Initialize and train the model
-    model = Classifier(input_size=feat_dim, num_classes=len(cat2id))
-    train_model(model, train_loader, val_loader, num_epochs=num_epochs, learning_rate=learning_rate)
+    num_runs = 10
+    best_val_f1 = 0.0
+    best_model_path = None
+    best_checkpoint = None
 
-    # Test the model
+    for run in range(num_runs):
+        run_name = f"{args.task}_{args.dataset}_{args.model}_{args.method}_run{run+1}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        wandb.init(
+            project="code-llm-embedding-eval",
+            name=run_name,
+            config={
+                "task": args.task,
+                "dataset": args.dataset,
+                "model": args.model,
+                "batch_size": batch_size,
+                "num_epochs": num_epochs,
+                "learning_rate": learning_rate,
+                "method": method,
+                "run": run + 1
+            }
+        )
+
+        model = Classifier(input_size=feat_dim, num_classes=len(cat2id))
+        model_path = train_model(model, train_loader, val_loader, num_epochs, learning_rate)
+
+        checkpoint = torch.load(model_path, weights_only=False)
+        val_f1 = checkpoint['val_f1']
+
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            best_model_path = f"checkpoints/best_overall_{args.task}_{args.dataset}_{args.model}_{args.method}.pt"
+            best_checkpoint = checkpoint
+            torch.save(checkpoint, best_model_path)
+            print(f"New best overall model found at run {run+1} with val F1: {val_f1:.4f}")
+
+        wandb.finish()
+
+    print(f"\nBest model across all runs: {best_model_path} (val F1: {best_val_f1:.4f})")
+    model = Classifier(input_size=feat_dim, num_classes=len(cat2id))
+    model.load_state_dict(best_checkpoint['model_state_dict'])
     test_model(model, test_loader)

@@ -8,7 +8,11 @@ import json
 import os
 import argparse
 from configs import get_model, get_task
-
+import numpy as np
+from sklearn.metrics import f1_score
+from transformers import Trainer, TrainingArguments
+from datasets import Dataset
+from sklearn.metrics import f1_score, accuracy_score
 
 @dataclass
 class InputExample:
@@ -28,25 +32,27 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Feature extraction script.")
     parser.add_argument("--model", type=str, required=True, help="Model name (e.g., codebert, modernbert).")
     parser.add_argument("--task", type=str, required=True, help="Task name (e.g., vul).")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name (e.g., devign, primevul).")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for DataLoader.")
     return parser.parse_args()
 
 def convert_examples_to_features(examples, split, tokenizer, max_seq_length):
     features = []
     for (ex_index, example) in tqdm(enumerate(examples), total=len(examples), desc=f"Converting {split} examples to features"):
+        # cand_tokens = tokenizer.tokenize(example.source, max_length=max_seq_length, truncation=True)
         cand_tokens = tokenizer.tokenize(example.source)
-        if len(cand_tokens) > max_seq_length - 2: 
+        if len(cand_tokens) > max_seq_length - 2:
             cand_tokens = cand_tokens[0:(max_seq_length - 2)] 
 
         tokens = []
         input_type_ids = []
         
-        tokens.append("<s>")
+        tokens.append(tokenizer.cls_token)
         input_type_ids.append(0)
         for token in cand_tokens:
             tokens.append(token)
             input_type_ids.append(0)
-        tokens.append("</s>")
+        tokens.append(tokenizer.sep_token)
         input_type_ids.append(0)
 
         input_ids  = tokenizer.convert_tokens_to_ids(tokens)
@@ -69,22 +75,30 @@ def convert_examples_to_features(examples, split, tokenizer, max_seq_length):
                 label=example.label
             )
         )
-
     return features
 
-def read_examples(file_path, task, split):
+def read_examples(file_path, task, dataset_name, split):
     examples = []
     df = pd.read_parquet(file_path)
     if task == "vul":
-        for id, row in tqdm(df.iterrows(), total=len(df), desc=f"Reading {split} examples"):
-            examples.append(
-                InputExample(
-                    idx=id,
-                    source=row["func"],
-                    label=1 if row["is_vulnerable"] else 0
+        if dataset_name == "primevul":
+            for id, row in tqdm(df.iterrows(), total=len(df), desc=f"Reading {split} examples"):
+                examples.append(
+                    InputExample(
+                        idx=id,
+                        source=row["func"],
+                        label=1 if row["is_vulnerable"] else 0
+                    )
                 )
-            )
-
+        elif dataset_name == "devign":
+            for id, row in tqdm(df.iterrows(), total=len(df), desc=f"Reading {split} examples"):
+                examples.append(
+                    InputExample(
+                        idx=id,
+                        source=row["func"],
+                        label=1 if row["target"] else 0
+                    )
+                )
     return examples
 
 
@@ -134,7 +148,8 @@ if __name__ == "__main__":
 
     # Load the model and task configurations
     model_config = get_model(args.model)
-    task = get_task(args.task)
+    task = get_task(args.task, args.dataset)
+    dataset_name = args.dataset
 
     # Load the model and tokenizer
     tokenizer = model_config["tokenizer"].from_pretrained(model_config["model_path"])
@@ -149,16 +164,17 @@ if __name__ == "__main__":
 
     # Load dataset paths
     base_dir = task["base_dir"]
+
     train_file_path = os.path.join(base_dir, task["train_file"])
     test_file_path = os.path.join(base_dir, task["test_file"])
     valid_file_path = os.path.join(base_dir, task["valid_file"])
 
     # Read examples
-    train_examples = read_examples(train_file_path, args.task, "train")
-    test_examples = read_examples(test_file_path, args.task, "test")
-    valid_examples = read_examples(valid_file_path, args.task, "valid")
+    train_examples = read_examples(train_file_path, args.task, dataset_name, "train")
+    test_examples = read_examples(test_file_path, args.task, dataset_name, "test")
+    valid_examples = read_examples(valid_file_path, args.task, dataset_name, "valid")
 
-    # Convert examples to features
+    # # Convert examples to features
     train_features = convert_examples_to_features(train_examples, "train", tokenizer, max_seq_length)
     test_features = convert_examples_to_features(test_examples, "test", tokenizer, max_seq_length)
     valid_features = convert_examples_to_features(valid_examples, "valid", tokenizer, max_seq_length)
@@ -167,21 +183,21 @@ if __name__ == "__main__":
     train_dataset = TensorDataset(
         torch.tensor([f.input_ids for f in train_features], dtype=torch.long),
         torch.tensor([f.attention_mask for f in train_features], dtype=torch.long),
-        torch.tensor([int(f.idx) for f in train_features], dtype=torch.long),
+        torch.tensor([f.idx for f in train_features], dtype=torch.long),
     )
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 
     test_dataset = TensorDataset(
         torch.tensor([f.input_ids for f in test_features], dtype=torch.long),
         torch.tensor([f.attention_mask for f in test_features], dtype=torch.long),
-        torch.tensor([int(f.idx) for f in test_features], dtype=torch.long),
+        torch.tensor([f.idx for f in test_features], dtype=torch.long),
     )
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
     valid_dataset = TensorDataset(
         torch.tensor([f.input_ids for f in valid_features], dtype=torch.long),
         torch.tensor([f.attention_mask for f in valid_features], dtype=torch.long),
-        torch.tensor([int(f.idx) for f in valid_features], dtype=torch.long),
+        torch.tensor([f.idx for f in valid_features], dtype=torch.long),
     )
     valid_dataloader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False)
 
