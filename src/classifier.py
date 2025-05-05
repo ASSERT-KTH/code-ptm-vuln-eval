@@ -120,7 +120,6 @@ def evaluate_model(model, loader):
     f1 = f1_score(all_labels, all_preds, average='weighted')
     mcc = matthews_corrcoef(all_labels, all_preds)
 
-    # Print detailed evaluation results
     print("\nEvaluation Results:")
     print("=" * 50)
     print(f"Accuracy: {accuracy:.4f}")
@@ -283,28 +282,22 @@ def test_model(model, test_loader):
 if __name__ == "__main__":
     args = parse_args()
 
-    # Load task and model configurations
     task = get_task(args.task, args.dataset)
     model_config = get_model(args.model)
 
-    # Get hyperparameters from command line arguments
     batch_size = args.batch_size
     num_epochs = args.num_epochs
     learning_rate = args.learning_rate
     method = args.method
 
-    # Get the file paths for train, valid, and test datasets
     train_file = get_file_path(task, model_config, "train")
     valid_file = get_file_path(task, model_config, "valid")
     test_file = get_file_path(task, model_config, "test")
 
-    # Load training data
     train_X, train_y, feat_dim, cat2id, id2cat = load_data(train_file, method)
 
-    # Load validation data
     valid_X, valid_y, _, _, _ = load_data(valid_file, method)
 
-    # Load testing data
     test_X, test_y, _, _, _ = load_data(test_file, method)
 
     # Convert NumPy arrays to PyTorch tensors
@@ -326,7 +319,6 @@ if __name__ == "__main__":
     for seed in seeds:
         set_seed(seed)
 
-        # Create DataLoader objects
         train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
         val_loader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False)
         test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
@@ -347,7 +339,6 @@ if __name__ == "__main__":
     best_result = max(results, key=lambda x: x['val_f1'])
     print(f"\nBest model validation F1: {best_result['val_f1']:.4f}")
     
-    # Calculate test metrics statistics
     test_metrics = {
         'accuracy': np.array([r['test_metrics']['accuracy'] for r in results]),
         'f1': np.array([r['test_metrics']['f1'] for r in results]),
