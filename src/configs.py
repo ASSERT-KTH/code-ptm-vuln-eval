@@ -1,5 +1,5 @@
 import os
-from transformers import RobertaConfig, RobertaTokenizer, RobertaForSequenceClassification, ModernBertForSequenceClassification, ModernBertConfig, AutoTokenizer, MegatronBertForSequenceClassification, MegatronBertConfig
+from transformers import RobertaConfig, RobertaTokenizer, RobertaForSequenceClassification, ModernBertForSequenceClassification, ModernBertConfig, AutoTokenizer, MegatronBertForSequenceClassification, MegatronBertConfig, AutoConfig, AutoModelForSequenceClassification, AutoModelForSeq2SeqLM, AutoModel
 
 MODEL_CONFIGS = {
     "codebert": {
@@ -21,6 +21,34 @@ MODEL_CONFIGS = {
         "tokenizer": RobertaTokenizer,
         "model": RobertaForSequenceClassification,
         "model_path": "microsoft/graphcodebert-base",
+        "max_seq_length": 512,
+    },
+    "codesage": {
+        "config": AutoConfig,
+        "tokenizer": AutoTokenizer,
+        "model": AutoModelForSequenceClassification,
+        "model_path": "codesage/codesage-base",
+        "max_seq_length": 2048,
+    },
+    "unixcoder": {
+        "config": RobertaConfig,
+        "tokenizer": RobertaTokenizer,
+        "model": RobertaForSequenceClassification,
+        "model_path": "microsoft/unixcoder-base-nine",
+        "max_seq_length": 1024,
+    },
+    "codet5": {
+        "config": AutoConfig,
+        "tokenizer": AutoTokenizer,
+        "model": AutoModelForSeq2SeqLM,
+        "model_path": "Salesforce/codet5-base",
+        "max_seq_length": 512,
+    },
+    "codet5+": {
+        "config": AutoConfig,
+        "tokenizer": AutoTokenizer,
+        "model": AutoModelForSeq2SeqLM,
+        "model_path": "Salesforce/codet5p-220m",
         "max_seq_length": 512,
     },
 }

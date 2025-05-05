@@ -10,6 +10,10 @@ from configs import get_model, get_task
 from sklearn.metrics import f1_score, accuracy_score, matthews_corrcoef
 import wandb
 from datetime import datetime
+import random
+import numpy as np
+from typing import Dict, List
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train and evaluate a classifier on extracted features.")
@@ -19,9 +23,19 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for DataLoader.")
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs.")
     parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate for the optimizer.")
-    parser.add_argument("--method", type=str, default="CLS", choices=["CLS", "AVG", "MAX"], help="Method to use for feature extraction.")
+    parser.add_argument("--method", type=str, default="CLS", choices=["CLS", "AVG", "MAX", "EOS"], help="Method to use for feature extraction.")
 
     return parser.parse_args()
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 def load_data(file_path, method="CLS"):
     features = []
@@ -56,14 +70,84 @@ def get_file_path(task_config, model_config, split):
     model_name = model_config["model_path"].split("/")[-1]
     return f"{base_dir}/features/{model_name}/{split}_{model_name}_features.jsonl"
 
+
+def run_experiment(seed: int, model, train_loader, val_loader, test_loader, args) -> Dict:
+    
+    run_name = f"{args.task}_{args.dataset}_{args.model}_{args.method}_seed{seed}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    wandb.init(
+        project="code-llm-embedding-eval",
+        name=run_name,
+        config={
+            "task": args.task,
+            "dataset": args.dataset,
+            "model": args.model,
+            "batch_size": args.batch_size,
+            "num_epochs": args.num_epochs,
+            "learning_rate": args.learning_rate,
+            "method": args.method,
+            "seed": seed
+        }
+    )
+
+    model_path = train_model(model, train_loader, val_loader, args.num_epochs, args.learning_rate)
+    checkpoint = torch.load(model_path, weights_only=False)
+    
+    model.load_state_dict(checkpoint['model_state_dict'])
+    test_metrics = evaluate_model(model, test_loader)
+    
+    wandb.finish()
+    
+    return {
+        'model_path': model_path,
+        'val_f1': checkpoint['val_f1'],
+        'test_metrics': test_metrics
+    }
+
+
+def evaluate_model(model, loader):
+    model.eval()
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for x, y in loader:
+            outputs = model(x)
+            predicted = outputs.argmax(dim=1)
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(y.cpu().numpy())
+
+    accuracy = accuracy_score(all_labels, all_preds)
+    f1 = f1_score(all_labels, all_preds, average='weighted')
+    mcc = matthews_corrcoef(all_labels, all_preds)
+
+    # Print detailed evaluation results
+    print("\nEvaluation Results:")
+    print("=" * 50)
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"F1 Score: {f1:.4f}")
+    print(f"MCC Score: {mcc:.4f}")
+    print("=" * 50)
+
+    return {
+        "accuracy": accuracy,
+        "f1": f1,
+        "mcc": mcc
+    }
+
 class Classifier(nn.Module):
-    def __init__(self, input_size, num_classes):
+    def __init__(self, input_size, num_classes, hidden_size=768//2):
         super(Classifier, self).__init__()
-        self.fc1 = nn.Linear(input_size, num_classes)
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.dropout = nn.Dropout(0.2)
+        self.fc2 = nn.Linear(hidden_size, num_classes)
 
     def forward(self, x):
-        out = self.fc1(x)
-        return out
+        x = self.dropout(x)
+        x = self.fc1(x)
+        x = torch.tanh(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
 
 def train_model(model, train_loader, val_loader, num_epochs, learning_rate):
     criterion = nn.CrossEntropyLoss()
@@ -169,7 +253,6 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate):
 
 def test_model(model, test_loader):
     model.eval()
-    total = 0
     all_preds = []
     all_labels = []
 
@@ -177,9 +260,6 @@ def test_model(model, test_loader):
         for x, y in test_loader:
             outputs = model(x)
             predicted = outputs.argmax(dim=1)
-
-            # Accuracy computation
-            total += y.size(0)
 
             # Collect predictions and labels for F1
             all_preds.extend(predicted.cpu().numpy())
@@ -240,49 +320,42 @@ if __name__ == "__main__":
     val_dataset = torch.utils.data.TensorDataset(valid_X, valid_y)
     test_dataset = torch.utils.data.TensorDataset(test_X, test_y)
 
-    # Create DataLoader objects
-    train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
+    seeds = [42, 123, 456]
+    results = []
+    
+    for seed in seeds:
+        set_seed(seed)
 
-    num_runs = 10
-    best_val_f1 = 0.0
-    best_model_path = None
-    best_checkpoint = None
+        # Create DataLoader objects
+        train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False)
+        test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
 
-    for run in range(num_runs):
-        run_name = f"{args.task}_{args.dataset}_{args.model}_{args.method}_run{run+1}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        wandb.init(
-            project="code-llm-embedding-eval",
-            name=run_name,
-            config={
-                "task": args.task,
-                "dataset": args.dataset,
-                "model": args.model,
-                "batch_size": batch_size,
-                "num_epochs": num_epochs,
-                "learning_rate": learning_rate,
-                "method": method,
-                "run": run + 1
-            }
-        )
-
+        print(f"\nRunning experiment with seed {seed}")
         model = Classifier(input_size=feat_dim, num_classes=len(cat2id))
-        model_path = train_model(model, train_loader, val_loader, num_epochs, learning_rate)
-
-        checkpoint = torch.load(model_path, weights_only=False)
-        val_f1 = checkpoint['val_f1']
-
-        if val_f1 > best_val_f1:
-            best_val_f1 = val_f1
-            best_model_path = f"checkpoints/best_overall_{args.task}_{args.dataset}_{args.model}_{args.method}.pt"
-            best_checkpoint = checkpoint
-            torch.save(checkpoint, best_model_path)
-            print(f"New best overall model found at run {run+1} with val F1: {val_f1:.4f}")
-
-        wandb.finish()
-
-    print(f"\nBest model across all runs: {best_model_path} (val F1: {best_val_f1:.4f})")
-    model = Classifier(input_size=feat_dim, num_classes=len(cat2id))
-    model.load_state_dict(best_checkpoint['model_state_dict'])
-    test_model(model, test_loader)
+        result = run_experiment(
+            seed=seed,
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
+            args=args
+        )
+        results.append(result)
+    
+    # Find best model based on validation F1
+    best_result = max(results, key=lambda x: x['val_f1'])
+    print(f"\nBest model validation F1: {best_result['val_f1']:.4f}")
+    
+    # Calculate test metrics statistics
+    test_metrics = {
+        'accuracy': np.array([r['test_metrics']['accuracy'] for r in results]),
+        'f1': np.array([r['test_metrics']['f1'] for r in results]),
+        'mcc': np.array([r['test_metrics']['mcc'] for r in results])
+    }
+    
+    print("\nTest Results across all seeds:")
+    for metric, values in test_metrics.items():
+        mean = np.mean(values)
+        std = np.std(values)
+        print(f"{metric.upper()}: {mean:.3f} ± {std:.3f}")

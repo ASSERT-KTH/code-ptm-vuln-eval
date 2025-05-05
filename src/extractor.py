@@ -13,6 +13,8 @@ from sklearn.metrics import f1_score
 from transformers import Trainer, TrainingArguments
 from datasets import Dataset
 from sklearn.metrics import f1_score, accuracy_score
+import random
+import numpy as np
 
 @dataclass
 class InputExample:
@@ -28,6 +30,16 @@ class InputFeatures:
     attention_mask: list
     label: int
 
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Feature extraction script.")
     parser.add_argument("--model", type=str, required=True, help="Model name (e.g., codebert, modernbert).")
@@ -38,24 +50,58 @@ def parse_args():
 
 def convert_examples_to_features(examples, split, tokenizer, max_seq_length):
     features = []
-    for (ex_index, example) in tqdm(enumerate(examples), total=len(examples), desc=f"Converting {split} examples to features"):
-        # cand_tokens = tokenizer.tokenize(example.source, max_length=max_seq_length, truncation=True)
+    exceeded_count = 0
+    total_count = len(examples)
+    max_length_seen = 0
+    length_distribution = []
+    print(args.model)
+    for ex_index, example in tqdm(
+        enumerate(examples),
+        total=len(examples),
+        desc=f"Converting {split} examples to features",
+    ):
         cand_tokens = tokenizer.tokenize(example.source)
-        if len(cand_tokens) > max_seq_length - 2:
-            cand_tokens = cand_tokens[0:(max_seq_length - 2)] 
+        original_length = len(cand_tokens)
+        length_distribution.append(original_length)
+        max_length_seen = max(max_length_seen, original_length)
+        
+        if original_length > max_seq_length:
+            exceeded_count += 1
+
+        if args.model == "codesage":
+            if len(cand_tokens) > max_seq_length - 1:
+                cand_tokens = cand_tokens[0 : (max_seq_length - 1)]
+        elif args.model == "unixcoder":
+            if len(cand_tokens) > max_seq_length - 4:
+                cand_tokens = cand_tokens[0 : (max_seq_length - 4)]
+        else:
+            if len(cand_tokens) > max_seq_length - 2:
+                cand_tokens = cand_tokens[0 : (max_seq_length - 2)]
 
         tokens = []
         input_type_ids = []
+
+        if args.model != "codesage":
+            tokens.append(tokenizer.cls_token)
+            input_type_ids.append(0)
+
+        if args.model == "unixcoder":
+            tokens.append("<encoder-only>")
+            input_type_ids.append(0)
+            tokens.append(tokenizer.sep_token)
+            input_type_ids.append(0)
         
-        tokens.append(tokenizer.cls_token)
-        input_type_ids.append(0)
         for token in cand_tokens:
             tokens.append(token)
             input_type_ids.append(0)
-        tokens.append(tokenizer.sep_token)
-        input_type_ids.append(0)
 
-        input_ids  = tokenizer.convert_tokens_to_ids(tokens)
+        if args.model == "codesage" or args.model == "codet5" or args.model == "codet5+":
+            tokens.append(tokenizer.eos_token)
+            input_type_ids.append(0)
+        else:
+            tokens.append(tokenizer.sep_token)
+            input_type_ids.append(0)
+        input_ids = tokenizer.convert_tokens_to_ids(tokens)
         input_mask = [1] * len(input_ids)
 
         while len(input_ids) < max_seq_length:
@@ -72,10 +118,23 @@ def convert_examples_to_features(examples, split, tokenizer, max_seq_length):
                 tokens=tokens,
                 input_ids=input_ids,
                 attention_mask=input_mask,
-                label=example.label
+                label=example.label,
             )
         )
+
+    print(f"\nStatistics for {split} split:")
+    print(f"Total examples: {total_count}")
+    print(f"Examples exceeding max length ({max_seq_length}): {exceeded_count} ({(exceeded_count/total_count)*100:.2f}%)")
+    print(f"Maximum length seen: {max_length_seen}")
+    print(f"Average length: {sum(length_distribution)/len(length_distribution):.2f}")
+    
+    percentiles = [25, 50, 75, 90, 95, 99]
+    length_array = np.array(length_distribution)
+    for p in percentiles:
+        value = np.percentile(length_array, p)
+        print(f"{p}th percentile: {value:.2f}")
     return features
+
 
 def read_examples(file_path, task, dataset_name, split):
     examples = []
@@ -104,63 +163,106 @@ def read_examples(file_path, task, dataset_name, split):
 
 def generate_features_json(dataloader, features, task, split):
     full_model_name = model.config._name_or_path
-    model_name = full_model_name.split("/")[-1]
+    model_name = full_model_name.split("/")[-1].lower()
     base_dir = task["base_dir"]
     output_dir = f"{base_dir}/features/{model_name}"
     os.makedirs(output_dir, exist_ok=True)
     output_file = f"{output_dir}/{split}_{model_name}_features.jsonl"
 
+    has_cls = any(m in model_name for m in MODELS_WITH_CLS)
+    has_eos = any(m in model_name for m in MODELS_WITH_EOS)
+    print(f"Model has CLS token: {has_cls}, EOS token: {has_eos}")
+
     with open(output_file, "w") as writer:
-        # Disabling Gradient Computation
         with torch.no_grad():
-            # Iterating Over the DataLoader
             for batch in tqdm(dataloader, desc=f"Extracting features for {split} split", total=len(dataloader)):
                 input_ids, attention_mask, idx = batch
                 input_ids = input_ids.to(device)
                 attention_mask = attention_mask.to(device)
-                # Forward Pass
-                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-                last_hidden_state = outputs.hidden_states[-1]
-                # Iterating Over Batch Indices
+
+                if "codet5" in model.__dict__["config"]._name_or_path:
+                    outputs = model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        decoder_input_ids=input_ids,
+                        use_cache=False,
+                        return_dict=True,
+                    )
+                    last_hidden_state = outputs.encoder_last_hidden_state
+                else:
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                    last_hidden_state = outputs.hidden_states[-1]
+
                 for iter_index, example_index in enumerate(idx):
                     feature = features[example_index.item()]
                     unique_id = int(feature.idx)
                     label = feature.label
-                    cls_features = last_hidden_state[iter_index][0].tolist()
-                    avg_features = torch.mean(last_hidden_state[iter_index], dim=0).tolist()
-                    max_features = torch.max(last_hidden_state[iter_index], dim=0).values.tolist()
+                    feature_dict = {}
+
+                    if has_cls:
+                        cls_features = last_hidden_state[iter_index][0].tolist()
+                        feature_dict["CLS"] = [round(value, 12) for value in cls_features]
+
+                    if has_eos:
+                        eos_mask = (input_ids[iter_index] == tokenizer.eos_token_id)
+                        eos_indices = eos_mask.nonzero(as_tuple=True)[0]
+                        if len(eos_indices) > 0:
+                            eos_index = eos_indices[-1].item()
+                            eos_features = last_hidden_state[iter_index][eos_index].tolist()
+                            feature_dict["EOS"] = [round(value, 12) for value in eos_features]
+
+                    masked_hidden = last_hidden_state[iter_index] * attention_mask[iter_index].unsqueeze(-1)
+                    avg_features = torch.mean(masked_hidden, dim=0).tolist()
+                    max_features = torch.max(masked_hidden, dim=0).values.tolist()
+                    
+                    feature_dict["AVG"] = [round(value, 12) for value in avg_features]
+                    feature_dict["MAX"] = [round(value, 12) for value in max_features]
+
                     output_json = {
                         "index": unique_id,
                         "label": label,
-                        "features": {
-                            "CLS": [round(value, 12) for value in cls_features],
-                            "AVG": [round(value, 12) for value in avg_features],
-                            "MAX": [round(value, 12) for value in max_features],
-                        }
+                        "features": feature_dict
                     }
                     writer.write(json.dumps(output_json) + "\n")
 
     print(f"Features saved to {output_file}")
 
 if __name__ == "__main__":
-    # Parse command line arguments
+    seed = 42
+    set_seed(seed)
+
     args = parse_args()
 
-    # Load the model and task configurations
     model_config = get_model(args.model)
     task = get_task(args.task, args.dataset)
     dataset_name = args.dataset
 
-    # Load the model and tokenizer
-    tokenizer = model_config["tokenizer"].from_pretrained(model_config["model_path"])
+    if args.model == "codet5" or args.model == "codet5+":
+        config = model_config["config"].from_pretrained(
+            model_config["model_path"],
+            trust_remote_code=True,
+            output_hidden_states=True,
+            return_dict=True
+        )
+    else:
+        config = model_config["config"].from_pretrained(
+            model_config["model_path"],
+            trust_remote_code=True,
+            output_hidden_states=True,
+        )
+    tokenizer = model_config["tokenizer"].from_pretrained(
+        model_config["model_path"],
+        trust_remote_code=True,
+        config=config,
+    )
     model = model_config["model"].from_pretrained(
         model_config["model_path"],
-        config=model_config["config"].from_pretrained(
-            model_config["model_path"],
-            output_hidden_states=True
-        )
+        trust_remote_code=True,
+        config=config,
     )
     max_seq_length = model_config["max_seq_length"]
+    MODELS_WITH_CLS = ["codebert", "graphcodebert", "modernbert", "unixcoder", "codet5", "codet5+"]
+    MODELS_WITH_EOS = ["codet5", "codet5+"]
 
     # Load dataset paths
     base_dir = task["base_dir"]
@@ -185,7 +287,7 @@ if __name__ == "__main__":
         torch.tensor([f.attention_mask for f in train_features], dtype=torch.long),
         torch.tensor([f.idx for f in train_features], dtype=torch.long),
     )
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
 
     test_dataset = TensorDataset(
         torch.tensor([f.input_ids for f in test_features], dtype=torch.long),
