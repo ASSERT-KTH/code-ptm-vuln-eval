@@ -95,7 +95,7 @@ def convert_examples_to_features(examples, split, tokenizer, max_seq_length):
             tokens.append(token)
             input_type_ids.append(0)
 
-        if args.model == "codesage" or args.model == "codet5" or args.model == "codet5+":
+        if args.model == "codesage" or args.model == "codet5" or args.model == "codet5+" or args.model == "codit5" or args.model == "ast-t5" or args.model == "divot5":
             tokens.append(tokenizer.eos_token)
             input_type_ids.append(0)
         else:
@@ -158,19 +158,30 @@ def read_examples(file_path, task, dataset_name, split):
                         label=1 if row["target"] else 0
                     )
                 )
+        elif dataset_name == "diversevul" or dataset_name == "diversevul_balanced":
+            for id, row in tqdm(df.iterrows(), total=len(df), desc=f"Reading {split} examples"):
+                examples.append(
+                    InputExample(
+                        idx=id,
+                        source=row["func"],
+                        label=row["target"]
+                    )
+                )
     return examples
 
 
 def generate_features_json(dataloader, features, task, split):
     full_model_name = model.config._name_or_path
     model_name = full_model_name.split("/")[-1].lower()
+    if args.model =="codit5":
+        model_name = "codit5"
     base_dir = task["base_dir"]
     output_dir = f"{base_dir}/features/{model_name}"
     os.makedirs(output_dir, exist_ok=True)
     output_file = f"{output_dir}/{split}_{model_name}_features.jsonl"
 
-    has_cls = any(m in model_name for m in MODELS_WITH_CLS)
-    has_eos = any(m in model_name for m in MODELS_WITH_EOS)
+    has_cls = any(m in args.model for m in MODELS_WITH_CLS)
+    has_eos = any(m in args.model for m in MODELS_WITH_EOS)
     print(f"Model has CLS token: {has_cls}, EOS token: {has_eos}")
 
     with open(output_file, "w") as writer:
@@ -180,7 +191,7 @@ def generate_features_json(dataloader, features, task, split):
                 input_ids = input_ids.to(device)
                 attention_mask = attention_mask.to(device)
 
-                if "codet5" in model.__dict__["config"]._name_or_path:
+                if "codet5" in model.__dict__["config"]._name_or_path or "ast_t5" in model.__dict__["config"]._name_or_path or args.model == "codit5" or args.model == "divot5":
                     outputs = model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
@@ -211,10 +222,21 @@ def generate_features_json(dataloader, features, task, split):
                             eos_features = last_hidden_state[iter_index][eos_index].tolist()
                             feature_dict["EOS"] = [round(value, 12) for value in eos_features]
 
-                    masked_hidden = last_hidden_state[iter_index] * attention_mask[iter_index].unsqueeze(-1)
-                    avg_features = torch.mean(masked_hidden, dim=0).tolist()
-                    max_features = torch.max(masked_hidden, dim=0).values.tolist()
+                    avg_features = (last_hidden_state[iter_index] * attention_mask[iter_index].unsqueeze(-1)).sum(dim=0) / attention_mask[iter_index].sum(dim=0, keepdim=True)
+
                     
+                    mask = attention_mask[iter_index].unsqueeze(-1)
+                    neg_inf = torch.finfo(last_hidden_state.dtype).min
+                    masked_hs = last_hidden_state[iter_index].masked_fill(mask == 0, neg_inf)
+
+                    max_features = masked_hs.max(dim=0).values
+
+
+                    avg_features = avg_features.tolist()
+                    max_features = max_features.tolist()
+
+                    
+
                     feature_dict["AVG"] = [round(value, 12) for value in avg_features]
                     feature_dict["MAX"] = [round(value, 12) for value in max_features]
 
@@ -237,7 +259,7 @@ if __name__ == "__main__":
     task = get_task(args.task, args.dataset)
     dataset_name = args.dataset
 
-    if args.model == "codet5" or args.model == "codet5+":
+    if args.model == "codet5" or args.model == "codet5+" or args.model == "codit5" or args.model == "ast-t5":
         config = model_config["config"].from_pretrained(
             model_config["model_path"],
             trust_remote_code=True,
@@ -261,8 +283,8 @@ if __name__ == "__main__":
         config=config,
     )
     max_seq_length = model_config["max_seq_length"]
-    MODELS_WITH_CLS = ["codebert", "graphcodebert", "modernbert", "unixcoder", "codet5", "codet5+"]
-    MODELS_WITH_EOS = ["codet5", "codet5+"]
+    MODELS_WITH_CLS = ["codebert", "graphcodebert", "modernbert", "unixcoder", "codet5", "codet5+", "codit5", "ast-t5", "divot5"]
+    MODELS_WITH_EOS = ["codet5", "codet5+", "codit5", "ast-t5", "divot5"]
 
     # Load dataset paths
     base_dir = task["base_dir"]

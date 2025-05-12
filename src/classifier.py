@@ -68,6 +68,12 @@ def load_data(file_path, method="CLS"):
 def get_file_path(task_config, model_config, split):
     base_dir = task_config["base_dir"]
     model_name = model_config["model_path"].split("/")[-1]
+    if args.model =="codit5":
+        model_name = "codit5"
+    elif args.model == "divot5":
+        model_name = "divot5-220m"
+    elif args.model == "modernbert":
+        model_name = "modernbert-base"
     return f"{base_dir}/features/{model_name}/{split}_{model_name}_features.jsonl"
 
 

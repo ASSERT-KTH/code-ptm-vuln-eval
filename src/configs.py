@@ -51,6 +51,27 @@ MODEL_CONFIGS = {
         "model_path": "Salesforce/codet5p-220m",
         "max_seq_length": 512,
     },
+    "codit5": {
+        "config": AutoConfig,
+        "tokenizer": AutoTokenizer,
+        "model": AutoModelForSeq2SeqLM,
+        "model_path": "JiyangZhang/CoditT5",
+        "max_seq_length": 512,
+    },
+    "ast-t5": {
+        "config": AutoConfig,
+        "tokenizer": AutoTokenizer,
+        "model": AutoModelForSeq2SeqLM,
+        "model_path": "gonglinyuan/ast_t5_base",
+        "max_seq_length": 1024,
+    },
+    "divot5": {
+        "config": AutoConfig,
+        "tokenizer": AutoTokenizer,
+        "model": AutoModelForSeq2SeqLM,
+        "model_path": "qyliang/DivoT5-220M",
+        "max_seq_length": 512,
+    },
 }
 
 TASK_CONFIGS = {
@@ -64,6 +85,18 @@ TASK_CONFIGS = {
                 },
                 "primevul": {
                     "base_dir": "data/vul/primevul",
+                    "train_file": "train.parquet",
+                    "test_file": "test.parquet",
+                    "valid_file": "valid.parquet",
+                },
+                "diversevul": {
+                    "base_dir": "data/vul/diversevul",
+                    "train_file": "train.parquet",
+                    "test_file": "test.parquet",
+                    "valid_file": "valid.parquet",
+                },
+                "diversevul_balanced": {
+                    "base_dir": "data/vul/diversevul_balanced",
                     "train_file": "train.parquet",
                     "test_file": "test.parquet",
                     "valid_file": "valid.parquet",
