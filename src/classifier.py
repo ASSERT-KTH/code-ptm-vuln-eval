@@ -95,17 +95,17 @@ def run_experiment(seed: int, model, train_loader, val_loader, test_loader, args
         }
     )
 
-    model_path = train_model(model, train_loader, val_loader, args.num_epochs, args.learning_rate)
-    checkpoint = torch.load(model_path, weights_only=False)
+    # model_path = train_model(model, train_loader, val_loader, args.num_epochs, args.learning_rate)
+    # checkpoint = torch.load(model_path, weights_only=False)
     
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # model.load_state_dict(checkpoint['model_state_dict'])
     test_metrics = evaluate_model(model, test_loader)
     
     wandb.finish()
     
     return {
-        'model_path': model_path,
-        'val_f1': checkpoint['val_f1'],
+        # 'model_path': model_path,
+        # 'val_f1': checkpoint['val_f1'],
         'test_metrics': test_metrics
     }
 
@@ -342,8 +342,8 @@ if __name__ == "__main__":
         results.append(result)
     
     # Find best model based on validation F1
-    best_result = max(results, key=lambda x: x['val_f1'])
-    print(f"\nBest model validation F1: {best_result['val_f1']:.4f}")
+    # best_result = max(results, key=lambda x: x['val_f1'])
+    # print(f"\nBest model validation F1: {best_result['val_f1']:.4f}")
     
     test_metrics = {
         'accuracy': np.array([r['test_metrics']['accuracy'] for r in results]),
