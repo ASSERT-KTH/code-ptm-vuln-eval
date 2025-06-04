@@ -16,6 +16,7 @@ from sklearn.metrics import f1_score, accuracy_score
 import random
 import numpy as np
 
+
 @dataclass
 class InputExample:
     idx: str
@@ -54,7 +55,7 @@ def convert_examples_to_features(examples, split, tokenizer, max_seq_length):
     total_count = len(examples)
     max_length_seen = 0
     length_distribution = []
-    print(args.model)
+    is_encoder_decoder = args.model in ENCODER_DECODER_MODELS
     for ex_index, example in tqdm(
         enumerate(examples),
         total=len(examples),
@@ -95,7 +96,7 @@ def convert_examples_to_features(examples, split, tokenizer, max_seq_length):
             tokens.append(token)
             input_type_ids.append(0)
 
-        if args.model == "codesage" or args.model == "codet5" or args.model == "codet5+" or args.model == "codit5" or args.model == "ast-t5" or args.model == "divot5":
+        if args.model == "random-embed" or args.model == "codesage" or is_encoder_decoder:
             tokens.append(tokenizer.eos_token)
             input_type_ids.append(0)
         else:
@@ -171,10 +172,8 @@ def read_examples(file_path, task, dataset_name, split):
 
 
 def generate_features_json(dataloader, features, task, split):
-    full_model_name = model.config._name_or_path
-    model_name = full_model_name.split("/")[-1].lower()
-    if args.model =="codit5":
-        model_name = "codit5"
+    model_name = args.model
+    is_encoder_decoder = args.model in ENCODER_DECODER_MODELS
     base_dir = task["base_dir"]
     output_dir = f"{base_dir}/features/{model_name}"
     os.makedirs(output_dir, exist_ok=True)
@@ -191,7 +190,7 @@ def generate_features_json(dataloader, features, task, split):
                 input_ids = input_ids.to(device)
                 attention_mask = attention_mask.to(device)
 
-                if "codet5" in model.__dict__["config"]._name_or_path or "ast_t5" in model.__dict__["config"]._name_or_path or args.model == "codit5" or args.model == "divot5":
+                if is_encoder_decoder:
                     outputs = model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
@@ -259,33 +258,40 @@ if __name__ == "__main__":
     task = get_task(args.task, args.dataset)
     dataset_name = args.dataset
 
-    if args.model == "codet5" or args.model == "codet5+" or args.model == "codit5" or args.model == "ast-t5":
-        config = model_config["config"].from_pretrained(
-            model_config["model_path"],
-            trust_remote_code=True,
-            output_hidden_states=True,
-            return_dict=True
-        )
+    if args.model == "random-embed":
+        config = model_config["config"]()
+        tokenizer = model_config["tokenizer"]()
+        model = model_config["model"](hidden_size=768)
+        max_seq_length = model_config["max_seq_length"]
     else:
-        config = model_config["config"].from_pretrained(
+        if args.model == "codet5" or args.model == "codet5+" or args.model == "codit5" or args.model == "ast-t5":
+            config = model_config["config"].from_pretrained(
+                model_config["model_path"],
+                trust_remote_code=True,
+                output_hidden_states=True,
+                return_dict=True
+            )
+        else:
+            config = model_config["config"].from_pretrained(
+                model_config["model_path"],
+                trust_remote_code=True,
+                output_hidden_states=True,
+            )
+        tokenizer = model_config["tokenizer"].from_pretrained(
             model_config["model_path"],
             trust_remote_code=True,
-            output_hidden_states=True,
+            config=config,
         )
-    tokenizer = model_config["tokenizer"].from_pretrained(
-        model_config["model_path"],
-        trust_remote_code=True,
-        config=config,
-    )
-    model = model_config["model"].from_pretrained(
-        model_config["model_path"],
-        trust_remote_code=True,
-        config=config,
-    )
+        model = model_config["model"].from_pretrained(
+            model_config["model_path"],
+            trust_remote_code=True,
+            config=config,
+        )
     max_seq_length = model_config["max_seq_length"]
-    MODELS_WITH_CLS = ["codebert", "graphcodebert", "modernbert", "unixcoder", "codet5", "codet5+", "codit5", "ast-t5", "divot5"]
-    MODELS_WITH_EOS = ["codet5", "codet5+", "codit5", "ast-t5", "divot5"]
-
+    MODELS_WITH_CLS = ["codebert", "graphcodebert", "modernbert", "modernbert-large", "unixcoder", "codet5", "codet5+", "codit5", "ast-t5", "divot5", "random-embed"]
+    MODELS_WITH_EOS = ["codesage", "codet5", "codet5+", "codit5", "ast-t5", "divot5", "random-embed"]
+    ENCODER_DECODER_MODELS = ["codet5", "codet5+", "codit5", "ast-t5", "divot5", "ast_t5"]
+    
     # Load dataset paths
     base_dir = task["base_dir"]
 

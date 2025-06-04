@@ -7,7 +7,7 @@ import torch.nn as nn
 from tqdm import tqdm
 import argparse
 from configs import get_model, get_task
-from sklearn.metrics import f1_score, accuracy_score, matthews_corrcoef
+from sklearn.metrics import f1_score, accuracy_score, matthews_corrcoef, confusion_matrix
 import wandb
 from datetime import datetime
 import random
@@ -19,7 +19,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train and evaluate a classifier on extracted features.")
     parser.add_argument("--task", type=str, required=True, help="Task name (e.g., vul).")
     parser.add_argument("--model", type=str, required=True, help="Model name (e.g., codebert).")
-    parser.add_argument("--dataset", type=str, required=True, help="Dataset name (e.g., devign, primevul).")
+    parser.add_argument("--dataset", type=str, required=True, help="Dataset name for train/val (e.g., primevul).")
+    parser.add_argument("--test_dataset", type=str, required=False, help="Dataset name for test (e.g., diversevul).")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for DataLoader.")
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of training epochs.")
     parser.add_argument("--learning_rate", type=float, default=5e-5, help="Learning rate for the optimizer.")
@@ -29,6 +30,7 @@ def parse_args():
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -36,6 +38,7 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
 
 def load_data(file_path, method="CLS"):
     features = []
@@ -48,7 +51,6 @@ def load_data(file_path, method="CLS"):
     with open(file_path, "r") as f:
         for line in tqdm(f, desc=f"Loading data from {file_path}", total=total_lines):
             data = json.loads(line)
-            # Extract features based on the specified method
             if method not in data["features"]:
                 raise ValueError(f"Pooling method '{method}' not found in features.")
             feature_vector = data["features"][method]
@@ -65,15 +67,9 @@ def load_data(file_path, method="CLS"):
     feat_dim = X.shape[1]
     return X, y, feat_dim, cat2id, id2cat
 
-def get_file_path(task_config, model_config, split):
+def get_file_path(task_config, split):
     base_dir = task_config["base_dir"]
-    model_name = model_config["model_path"].split("/")[-1]
-    if args.model =="codit5":
-        model_name = "codit5"
-    elif args.model == "divot5":
-        model_name = "divot5-220m"
-    elif args.model == "modernbert":
-        model_name = "modernbert-base"
+    model_name = args.model
     return f"{base_dir}/features/{model_name}/{split}_{model_name}_features.jsonl"
 
 
@@ -95,17 +91,17 @@ def run_experiment(seed: int, model, train_loader, val_loader, test_loader, args
         }
     )
 
-    # model_path = train_model(model, train_loader, val_loader, args.num_epochs, args.learning_rate)
-    # checkpoint = torch.load(model_path, weights_only=False)
+    model_path = train_model(model, train_loader, val_loader, args.num_epochs, args.learning_rate)
+    checkpoint = torch.load(model_path, weights_only=False)
     
-    # model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['model_state_dict'])
     test_metrics = evaluate_model(model, test_loader)
     
     wandb.finish()
     
     return {
-        # 'model_path': model_path,
-        # 'val_f1': checkpoint['val_f1'],
+        'model_path': model_path,
+        'val_f1': checkpoint['val_f1'],
         'test_metrics': test_metrics
     }
 
@@ -123,7 +119,7 @@ def evaluate_model(model, loader):
             all_labels.extend(y.cpu().numpy())
 
     accuracy = accuracy_score(all_labels, all_preds)
-    f1 = f1_score(all_labels, all_preds, average='weighted')
+    f1 = f1_score(all_labels, all_preds, average='macro')
     mcc = matthews_corrcoef(all_labels, all_preds)
 
     print("\nEvaluation Results:")
@@ -189,7 +185,7 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate):
         # Calculate epoch-level metrics
         train_acc = accuracy_score(all_labels, all_preds)
         train_loss /= len(train_loader)
-        train_f1 = f1_score(all_labels, all_preds, average='weighted')
+        train_f1 = f1_score(all_labels, all_preds, average='macro')
         train_mcc = matthews_corrcoef(all_labels, all_preds)
 
         # Validation
@@ -211,7 +207,7 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate):
 
         val_loss /= len(val_loader)
         val_accuracy = accuracy_score(val_labels, val_preds)
-        val_f1 = f1_score(val_labels, val_preds, average='weighted')
+        val_f1 = f1_score(val_labels, val_preds, average='macro')
         val_mcc = matthews_corrcoef(val_labels, val_preds)
 
         if val_f1 > best_val_f1:
@@ -266,12 +262,11 @@ def test_model(model, test_loader):
             outputs = model(x)
             predicted = outputs.argmax(dim=1)
 
-            # Collect predictions and labels for F1
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(y.cpu().numpy())
 
     test_accuracy = accuracy_score(all_labels, all_preds)
-    test_f1 = f1_score(all_labels, all_preds, average='weighted')
+    test_f1 = f1_score(all_labels, all_preds, average='macro')
     test_mcc = matthews_corrcoef(all_labels, all_preds)
 
     # wandb.log({
@@ -288,42 +283,49 @@ def test_model(model, test_loader):
 if __name__ == "__main__":
     args = parse_args()
 
-    task = get_task(args.task, args.dataset)
+    trainval_task = get_task(args.task, args.dataset)
     model_config = get_model(args.model)
+
+    if args.test_dataset:
+        test_task = get_task(args.task, args.test_dataset)
+    else:
+        test_task = trainval_task
 
     batch_size = args.batch_size
     num_epochs = args.num_epochs
     learning_rate = args.learning_rate
     method = args.method
 
-    train_file = get_file_path(task, model_config, "train")
-    valid_file = get_file_path(task, model_config, "valid")
-    test_file = get_file_path(task, model_config, "test")
 
-    train_X, train_y, feat_dim, cat2id, id2cat = load_data(train_file, method)
-
-    valid_X, valid_y, _, _, _ = load_data(valid_file, method)
-
-    test_X, test_y, _, _, _ = load_data(test_file, method)
-
-    # Convert NumPy arrays to PyTorch tensors
-    train_X = torch.tensor(train_X, dtype=torch.float32)
-    train_y = torch.tensor(train_y, dtype=torch.long)
-    valid_X = torch.tensor(valid_X, dtype=torch.float32)
-    valid_y = torch.tensor(valid_y, dtype=torch.long)
-    test_X = torch.tensor(test_X, dtype=torch.float32)
-    test_y = torch.tensor(test_y, dtype=torch.long)
-
-    # Create dataset objects
-    train_dataset = torch.utils.data.TensorDataset(train_X, train_y)
-    val_dataset = torch.utils.data.TensorDataset(valid_X, valid_y)
-    test_dataset = torch.utils.data.TensorDataset(test_X, test_y)
-
-    seeds = [42, 123, 456]
+    seeds = [42, 123, 456, 789, 101112, 131415, 161718, 192021, 222324, 252627]
     results = []
     
     for seed in seeds:
         set_seed(seed)
+
+        train_file = get_file_path(trainval_task, "train")
+        valid_file = get_file_path(trainval_task, "valid")
+        test_file = get_file_path(test_task, "test")
+
+        train_X, train_y, feat_dim, cat2id, id2cat = load_data(train_file, method)
+
+        valid_X, valid_y, _, _, _ = load_data(valid_file, method)
+
+        test_X, test_y, _, _, _ = load_data(test_file, method)
+
+
+        # Convert NumPy arrays to PyTorch tensors
+        train_X = torch.tensor(train_X, dtype=torch.float32)
+        train_y = torch.tensor(train_y, dtype=torch.long)
+        valid_X = torch.tensor(valid_X, dtype=torch.float32)
+        valid_y = torch.tensor(valid_y, dtype=torch.long)
+        test_X = torch.tensor(test_X, dtype=torch.float32)
+        test_y = torch.tensor(test_y, dtype=torch.long)
+
+        # Create dataset objects
+        train_dataset = torch.utils.data.TensorDataset(train_X, train_y)
+        val_dataset = torch.utils.data.TensorDataset(valid_X, valid_y)
+        test_dataset = torch.utils.data.TensorDataset(test_X, test_y)
 
         train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
         val_loader = torch.utils.data.DataLoader(dataset=val_dataset, batch_size=batch_size, shuffle=False)
@@ -342,8 +344,8 @@ if __name__ == "__main__":
         results.append(result)
     
     # Find best model based on validation F1
-    # best_result = max(results, key=lambda x: x['val_f1'])
-    # print(f"\nBest model validation F1: {best_result['val_f1']:.4f}")
+    best_result = max(results, key=lambda x: x['val_f1'])
+    print(f"\nBest model validation F1: {best_result['val_f1']:.4f}")
     
     test_metrics = {
         'accuracy': np.array([r['test_metrics']['accuracy'] for r in results]),
@@ -351,6 +353,15 @@ if __name__ == "__main__":
         'mcc': np.array([r['test_metrics']['mcc'] for r in results])
     }
     
+    print(f"\nDataset name: {args.dataset}")
+    if args.test_dataset:
+        print(f"Test dataset name: {args.test_dataset}")
+    else:
+        print(f"Test dataset name: {args.dataset}")
+    print(f"\nFeature extraction method: {args.method}")    
+    print(f"Model name: {args.model}")
+
+
     print("\nTest Results across all seeds:")
     for metric, values in test_metrics.items():
         mean = np.mean(values)

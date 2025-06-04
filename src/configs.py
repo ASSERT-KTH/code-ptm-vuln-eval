@@ -1,5 +1,6 @@
 import os
 from transformers import RobertaConfig, RobertaTokenizer, RobertaForSequenceClassification, ModernBertForSequenceClassification, ModernBertConfig, AutoTokenizer, MegatronBertForSequenceClassification, MegatronBertConfig, AutoConfig, AutoModelForSequenceClassification, AutoModelForSeq2SeqLM, AutoModel
+from random_model import RandomEmbeddingModel, DummyConfig, DummyTokenizer
 
 MODEL_CONFIGS = {
     "codebert": {
@@ -14,6 +15,13 @@ MODEL_CONFIGS = {
         "tokenizer": AutoTokenizer,
         "model": ModernBertForSequenceClassification,
         "model_path": "answerdotai/ModernBERT-base",
+        "max_seq_length": 8192,
+    },
+    "modernbert-large": {
+        "config": ModernBertConfig,
+        "tokenizer": AutoTokenizer,
+        "model": ModernBertForSequenceClassification,
+        "model_path": "answerdotai/ModernBERT-large",
         "max_seq_length": 8192,
     },
     "graphcodebert": {
@@ -70,6 +78,13 @@ MODEL_CONFIGS = {
         "tokenizer": AutoTokenizer,
         "model": AutoModelForSeq2SeqLM,
         "model_path": "qyliang/DivoT5-220M",
+        "max_seq_length": 512,
+    },
+    "random-embed": {
+        "config": DummyConfig,
+        "tokenizer": DummyTokenizer,
+        "model": RandomEmbeddingModel,
+        "model_path": None,
         "max_seq_length": 512,
     },
 }
