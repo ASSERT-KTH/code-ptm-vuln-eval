@@ -165,27 +165,27 @@ def main():
             "No classifier seeds resolved. Pass --classifier_seeds or use --same_seed."
         )
 
-    # if args.extract:
-    #     print(f"[extract] Embedding seeds: {embed_seeds}")
-    #     for es in tqdm(embed_seeds, desc="extract seeds"):
-    #         extract_random_features(
-    #             train_task,
-    #             args.dataset,
-    #             es,
-    #             ["train", "valid"],
-    #             bs=args.batch_size,
-    #             num_workers=args.num_workers,
-    #         )
-    #         extract_random_features(
-    #             test_task,
-    #             args.test_dataset or args.dataset,
-    #             es,
-    #             ["test"],
-    #             bs=args.batch_size,
-    #             num_workers=args.num_workers,
-    #         )
-    #     print("[extract] Done.")
-    #
+    if args.extract:
+        print(f"[extract] Embedding seeds: {embed_seeds}")
+        for es in tqdm(embed_seeds, desc="extract seeds"):
+            extract_random_features(
+                train_task,
+                args.dataset,
+                es,
+                ["train", "valid"],
+                bs=args.batch_size,
+                num_workers=args.num_workers,
+            )
+            extract_random_features(
+                test_task,
+                args.test_dataset or args.dataset,
+                es,
+                ["test"],
+                bs=args.batch_size,
+                num_workers=args.num_workers,
+            )
+        print("[extract] Done.")
+    
     all_results: Dict[int, Dict[str, np.ndarray]] = {}
     print(f"[classify] Classifier seeds: {clf_seeds}")
     for es in tqdm(embed_seeds, desc="classify over embedding seeds"):
