@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from sklearn.metrics import confusion_matrix
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from configs import get_model, get_task
@@ -70,6 +70,20 @@ def parse_args() -> argparse.Namespace:
         "--wandb", action="store_true", help="Enable Weights & Biases logging"
     )
     p.add_argument("--num_workers", type=int, default=2)
+    p.add_argument(
+        "--mode",
+        type=str,
+        default="train",
+        choices=["train", "eval"],
+        help="'train' trains the classifier and saves checkpoints; 'eval' loads saved checkpoints and evaluates on the test set.",
+    )
+    p.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="(eval mode only) Path to a single checkpoint .pt file. "
+        "When set, only that checkpoint is evaluated instead of all 10 seeds.",
+    )
     return p.parse_args()
 
 
@@ -150,15 +164,14 @@ def run(
     args: argparse.Namespace,
     train: LoadedFeatures,
     valid: LoadedFeatures,
-    test: LoadedFeatures,
 ) -> Dict:
     set_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    train_loader, val_loader, test_loader = build_loaders(
+    train_loader, val_loader, _ = build_loaders(
         (train.X, train.y),
         (valid.X, valid.y),
-        (test.X, test.y),
+        (valid.X, valid.y),  # dummy placeholder — test is not used during training
         batch_size=args.batch_size,
         num_workers=args.num_workers,
     )
@@ -205,6 +218,8 @@ def run(
                 "val_f1": val_m["f1"],
                 "val_accuracy": val_m["accuracy"],
                 "val_mcc": val_m["mcc"],
+                "feat_dim": train.feat_dim,
+                "num_classes": len(train.cat2id),
                 "hyperparameters": {
                     "learning_rate": args.learning_rate,
                     "batch_size": args.batch_size,
@@ -214,17 +229,51 @@ def run(
             torch.save(best_state, ckpt_path)
             print(f"   saved best checkpoint to {ckpt_path}")
 
-    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    clf.load_state_dict(state["model_state_dict"])
-    test_m = trainer.evaluate(test_loader)
-    print("\nTest results")
-    print(test_m["confusion_matrix"])
-    print({k: v for k, v in test_m.items() if k != "confusion_matrix"})
-
     if args.wandb and wandb is not None:
         wandb.finish()
 
-    return {"model_path": ckpt_path, "val_f1": state["val_f1"], "test_metrics": test_m}
+    return {"model_path": ckpt_path, "val_f1": best_f1}
+
+
+def eval_run(
+    seed: int,
+    args: argparse.Namespace,
+    test: LoadedFeatures,
+    ckpt_path: str,
+) -> Dict:
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+
+    feat_dim = state["feat_dim"]
+    num_classes = state["num_classes"]
+
+    ds = TensorDataset(
+        torch.tensor(test.X, dtype=torch.float32),
+        torch.tensor(test.y, dtype=torch.long),
+    )
+    test_loader = DataLoader(
+        ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+    )
+
+    clf = Classifier(input_size=feat_dim, num_classes=num_classes)
+    clf.load_state_dict(state["model_state_dict"])
+    trainer = Trainer(clf, lr=state["hyperparameters"]["learning_rate"], device=device)
+
+    test_m = trainer.evaluate(test_loader)
+    seed_label = f"Seed {seed}" if seed is not None else os.path.basename(ckpt_path)
+    print(f"\n{seed_label} — Test results")
+    print(test_m["confusion_matrix"])
+    print({k: v for k, v in test_m.items() if k != "confusion_matrix"})
+
+    return {"val_f1": state["val_f1"], "test_metrics": test_m}
 
 
 if __name__ == "__main__":
@@ -235,30 +284,53 @@ if __name__ == "__main__":
         get_task(args.task, args.test_dataset) if args.test_dataset else train_task
     )
 
-    train_file = get_feature_file(train_task["base_dir"], args.model, "train")
-    valid_file = get_feature_file(train_task["base_dir"], args.model, "valid")
-    test_file = get_feature_file(test_task["base_dir"], args.model, "test")
-
-    train = load_features_jsonl(train_file, args.method)
-    valid = load_features_jsonl(valid_file, args.method)
-    test = load_features_jsonl(test_file, args.method)
-
     seeds = [42, 123, 456, 789, 101112, 131415, 161718, 192021, 222324, 252627]
-    results = [run(seed, args, train, valid, test) for seed in seeds]
 
-    best = max(results, key=lambda r: r["val_f1"])
-    print(f"\nBest validation F1: {best['val_f1']:.4f}")
+    if args.mode == "train":
+        train_file = get_feature_file(train_task["base_dir"], args.model, "train")
+        valid_file = get_feature_file(train_task["base_dir"], args.model, "valid")
+        train = load_features_jsonl(train_file, args.method)
+        valid = load_features_jsonl(valid_file, args.method)
 
-    metrics = {
-        k: np.array([r["test_metrics"][k] for r in results])
-        for k in ("accuracy", "f1", "mcc")
-    }
-    print(
-        f"\nDataset: {args.dataset} | Test dataset: {args.test_dataset or args.dataset}"
-    )
-    print(f"Pooling: {args.method} | Model: {args.model}")
+        results = [run(seed, args, train, valid) for seed in seeds]
 
-    for name, arr in metrics.items():
-        print(
-            f"{name.upper():<9} mean±std: {arr.mean():.6f} ± {arr.std(ddof=1):.6f}  values: {[f'{v:.6f}' for v in arr]}"
-        )
+        best = max(results, key=lambda r: r["val_f1"])
+        print(f"\nBest validation F1: {best['val_f1']:.4f}")
+        print(f"Checkpoints saved in: checkpoints/")
+
+    elif args.mode == "eval":
+        test_file = get_feature_file(test_task["base_dir"], args.model, "test")
+        test = load_features_jsonl(test_file, args.method)
+
+        if args.checkpoint:
+            # Single-checkpoint evaluation
+            result = eval_run(
+                seed=None, args=args, test=test, ckpt_path=args.checkpoint
+            )
+            print(f"\nTest dataset: {args.test_dataset or args.dataset}")
+            print(f"Pooling: {args.method} | Model: {args.model}")
+            for name in ("accuracy", "f1", "mcc"):
+                print(f"{name.upper():<9}: {result['test_metrics'][name]:.6f}")
+        else:
+            # Full 10-seed evaluation
+            results = []
+            for seed in seeds:
+                run_name = (
+                    f"{args.task}_{args.dataset}_{args.model}_{args.method}_seed{seed}"
+                )
+                ckpt_path = os.path.join("checkpoints", f"{run_name}_best.pt")
+                results.append(eval_run(seed, args, test, ckpt_path))
+
+            metrics = {
+                k: np.array([r["test_metrics"][k] for r in results])
+                for k in ("accuracy", "f1", "mcc")
+            }
+            print(
+                f"\nDataset: {args.dataset} | Test dataset: {args.test_dataset or args.dataset}"
+            )
+            print(f"Pooling: {args.method} | Model: {args.model}")
+
+            for name, arr in metrics.items():
+                print(
+                    f"{name.upper():<9} mean±std: {arr.mean():.6f} ± {arr.std(ddof=1):.6f}  values: {[f'{v:.6f}' for v in arr]}"
+                )
