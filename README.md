@@ -18,6 +18,7 @@ The evaluation framework consists of the following components:
 ## Supported Models
 
 ### Encoder-Only Models
+
 - **CodeBERT** (base)
 - **GraphCodeBERT** (base)
 - **UniXcoder** variants (base, base-unimodal, base-nine)
@@ -25,6 +26,7 @@ The evaluation framework consists of the following components:
 - **ModernBERT** (base, large)
 
 ### Encoder-Decoder Models
+
 - **CodeT5** variants (small, base, large)
 - **CodeT5+** variants (220m, 220m-bimodal, 770m)
 - **CoditT5** (base)
@@ -32,16 +34,13 @@ The evaluation framework consists of the following components:
 - **DivoT5** variants (60m, 220m)
 
 ### Baseline
+
 - **Random Embedding Model** for statistical significance testing
 
 ## Installation
 
 ```bash
-# Install required dependencies
-pip install torch transformers scikit-learn pandas numpy tqdm
-
-# Optional: Install wandb for experiment tracking
-pip install wandb
+pip install -r requirements.txt
 ```
 
 ## Usage
@@ -59,9 +58,29 @@ python extractor.py \
     --seed 42
 ```
 
-### 2. Classification and Evaluation
+> **Extracted embeddings and best classifier checkpoint are available on Zenodo:** [https://doi.org/10.5281/zenodo.19147437](https://doi.org/10.5281/zenodo.19147437)
+> Download and place the feature files under `data/` and the checkpoint files under `checkpoints/`.
 
-Train and evaluate classifiers on extracted features:
+### 2. Train the Classifier
+
+Train classifiers on extracted features (runs 10 seeds, saves the best checkpoint per seed):
+
+```bash
+python classifier.py \
+    --task vul \
+    --model codebert-base \
+    --dataset primevul \
+    --batch_size 16 \
+    --num_epochs 10 \
+    --learning_rate 5e-5 \
+    --method CLS \
+    --mode train \
+    --wandb
+```
+
+### 3. Evaluate the Classifier
+
+Load saved checkpoints and evaluate on the test set (reports per-seed results and aggregated mean ± std):
 
 ```bash
 python classifier.py \
@@ -70,13 +89,24 @@ python classifier.py \
     --dataset primevul \
     --test_dataset diversevul \
     --batch_size 16 \
-    --num_epochs 10 \
-    --learning_rate 5e-5 \
     --method CLS \
-    --wandb
+    --mode eval
 ```
 
-### 3. Random Baseline Experiments
+To evaluate a single checkpoint, use `--checkpoint`:
+
+```bash
+python classifier.py \
+    --task vul \
+    --model codebert-base \
+    --dataset primevul \
+    --test_dataset diversevul \
+    --method CLS \
+    --mode eval \
+    --checkpoint checkpoints/vul_primevul_codebert-base_CLS_seed42_best.pt
+```
+
+### 4. Random Baseline Experiments
 
 Run comprehensive random baseline evaluation:
 
@@ -96,35 +126,48 @@ python experiments_random.py \
 ## Key Parameters
 
 ### Pooling Methods
+
 - `CLS`: Extract the embedding from the special [CLS] token position
 - `EOS`: Extract the embedding from the special <eos> (end-of-sequence) token position
 - `AVG`: Compute the average of all token embeddings, excluding padding tokens
 - `MAX`: Take the element-wise maximum across all token embeddings, excluding padding tokens
 
 ### Model Configuration
+
 - `--model`: Specify which Code PTM to use
 - `--task`: Task type (currently supports 'vul' for vulnerability detection)
 - `--dataset`: Training/validation dataset
 - `--test_dataset`: Test dataset (optional, defaults to same as training dataset)
 
 ### Training Configuration
+
 - `--batch_size`: Batch size for training
 - `--num_epochs`: Number of training epochs
 - `--learning_rate`: Learning rate for AdamW optimizer
 - `--seed`: Random seed for reproducibility
 
-
 ## Cross-Dataset Evaluation
 
-The framework supports cross-dataset evaluation to assess model generalization:
+The framework supports cross-dataset evaluation to assess model generalization.
+Train on one dataset, then evaluate on another by passing a different `--test_dataset`:
 
 ```bash
-# Train on PrimeVul, test on DiverseVul
+# Train on PrimeVul
 python classifier.py \
+    --task vul \
+    --dataset primevul \
+    --model codebert-base \
+    --method CLS \
+    --mode train
+
+# Evaluate on DiverseVul
+python classifier.py \
+    --task vul \
     --dataset primevul \
     --test_dataset diversevul \
     --model codebert-base \
-    --method CLS
+    --method CLS \
+    --mode eval
 ```
 
 ## Configuration
